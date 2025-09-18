@@ -1,0 +1,10 @@
+mysql-connector-python
+pyttsx3
+python-dotenv
+vosk
+pyaudio
+requests
+spacy
+dateparser
+psutil
+bcrypt

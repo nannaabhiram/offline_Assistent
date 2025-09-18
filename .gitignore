@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.build/
+
+# Virtual env
+venv/
+.env/
+
+# IDE/editor
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+
+# Local configs and secrets
+config/.env
+
+# Models and large artifacts
+models/
+models/vosk-model-en-us-0.22/
+
+# OS
+Thumbs.db
