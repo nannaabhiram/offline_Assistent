@@ -128,6 +128,153 @@ def get_system_logs(limit=10):
     return cursor.fetchall()
 
 
+# 🔹 MEMORIES (long-term small facts per user)
+def ensure_memories_table():
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NULL,
+                content TEXT NOT NULL,
+                tags VARCHAR(255) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+        )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def save_memory(content: str, user_id: int | None = None, tags: str | None = None) -> int:
+    conn = get_db_connection()
+    if not conn:
+        return -1
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO memories (user_id, content, tags) VALUES (%s, %s, %s)",
+            (user_id, content, tags),
+        )
+        conn.commit()
+        return cur.lastrowid
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return -1
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_recent_memories(user_id: int | None = None, limit: int = 20):
+    conn = get_db_connection()
+    if not conn:
+        return []
+    cur = conn.cursor(dictionary=True)
+    try:
+        if user_id:
+            cur.execute(
+                "SELECT id, user_id, content, tags, created_at FROM memories WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+                (user_id, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT id, user_id, content, tags, created_at FROM memories ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            )
+        return cur.fetchall()
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def search_memories(query: str, user_id: int | None = None, limit: int = 10):
+    conn = get_db_connection()
+    if not conn:
+        return []
+    cur = conn.cursor(dictionary=True)
+    try:
+        q = f"%{query}%"
+        if user_id:
+            cur.execute(
+                "SELECT id, user_id, content, tags, created_at FROM memories WHERE user_id = %s AND (content LIKE %s OR tags LIKE %s) ORDER BY created_at DESC LIMIT %s",
+                (user_id, q, q, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT id, user_id, content, tags, created_at FROM memories WHERE (content LIKE %s OR tags LIKE %s) ORDER BY created_at DESC LIMIT %s",
+                (q, q, limit),
+            )
+        return cur.fetchall()
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def delete_memory_by_id(mem_id: int) -> bool:
+    conn = get_db_connection()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM memories WHERE id = %s", (mem_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 # 🔹 SECURITY: Verify DB password before destructive actions
 def verify_db_password(candidate_password: str) -> bool:
     """Return True if the provided password can authenticate to the configured MySQL server.

@@ -51,20 +51,24 @@ import re
 import datetime
 import getpass
 from dotenv import load_dotenv
-from nlp.nlp_utils import parse_command
+from nlp.nlp_utils import parse_command, parse_intent
 import dateparser
+from dateparser.search import search_dates
 
 # Local imports
 from speech.stt import listen_voice
 from ai.brain import ask_ai
 from system.control import run_system_command, list_running_apps, block_app_by_name, block_apps_by_names
+from vision.detector import start_vision, stop_vision, vision_running, describe_frame
 from db.db_connection import (
     get_db_connection, save_conversation, save_task, log_action, get_system_logs,
     get_deleted_tasks,
     get_or_create_user, get_tasks_for_user_on_date,
     delete_user_by_name,
     create_user_with_password, verify_user_password, user_exists,
-    set_user_password, user_has_password
+    set_user_password, user_has_password,
+    # Memory helpers
+    ensure_memories_table, save_memory, get_recent_memories, search_memories, delete_memory_by_id
 )
 
 
@@ -107,6 +111,7 @@ load_dotenv(dotenv_path=dotenv_path)
 
 # Initialize text-to-speech
 engine = pyttsx3.init()
+tts_lock = threading.Lock()
 
 
 def speak(text):
@@ -115,15 +120,25 @@ def speak(text):
     prefix = f"{current_user_name}, " if current_user_id else ""
     say_text = prefix + text
     print(f"Assistant: {say_text}")
-    engine.say(say_text)
-    engine.runAndWait()
+    # Serialize engine access to avoid 'run loop already started' from multiple threads
+    try:
+        with tts_lock:
+            engine.say(say_text)
+            engine.runAndWait()
+    except Exception:
+        # Best-effort fallback: avoid crashing on TTS errors
+        pass
 
 
 def speak_no_prefix(text):
     """Speak without adding any user-name prefix."""
     print(f"Assistant: {text}")
-    engine.say(text)
-    engine.runAndWait()
+    try:
+        with tts_lock:
+            engine.say(text)
+            engine.runAndWait()
+    except Exception:
+        pass
 
 
 def get_user_input(mode="cli"):
@@ -189,6 +204,49 @@ def parse_reminder(user_input):
     return None, None
 
 
+def parse_reminder_natural(user_input: str):
+    """Parse flexible reminder phrases like:
+    - "remind me call yash at 3:07pm today"
+    - "remind me to call mom in 10 minutes"
+    Returns (text, remind_time) or (None, None).
+    """
+    if not user_input:
+        return None, None
+    # Find the first datetime-like expression in the input
+    try:
+        results = search_dates(user_input, settings={
+            'PREFER_DATES_FROM': 'future',
+            'RELATIVE_BASE': datetime.datetime.now()
+        })
+    except Exception:
+        results = None
+    if not results:
+        return None, None
+    # Choose the earliest match in the text (first result)
+    matched_str, dt = results[0]
+    if not isinstance(dt, datetime.datetime):
+        # Promote date to datetime at a reasonable time (now's time)
+        dt = datetime.datetime.combine(dt, datetime.datetime.now().time())
+    dt = dt.replace(second=0, microsecond=0)
+
+    # Build reminder text by removing the matched date/time phrase and boilerplate
+    text = user_input
+    text = text.replace(matched_str, " ")
+    low = text.lower()
+    for prefix in ["remind me to ", "remind me ", "remind "]:
+        if low.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    # Clean leftover connectors
+    for tok in [" at ", " on ", " by ", " today ", " tomorrow "]:
+        text = text.replace(tok, " ")
+    text = text.strip().lstrip('to ').strip()
+    # Fallback if text ended up empty
+    if not text:
+        text = user_input
+    return text.strip(), dt
+
+
 def handle_delete_command(user_input: str):
     user_input = user_input.lower()
 
@@ -222,6 +280,11 @@ def main():
     if not db:
         print("❌ Database connection failed. Exiting.")
         return
+    # Ensure long-term memory table exists
+    try:
+        ensure_memories_table()
+    except Exception:
+        pass
     
     # Initialize default user context if not set
     global current_user_id, current_user_name
@@ -280,6 +343,14 @@ def main():
     mode = input("Choose mode (cli/voice): ").strip().lower()
     if mode not in ["cli", "voice"]:
         mode = "cli"
+    
+    # Start reminder watcher in the background so reminders fire on time
+    try:
+        reminder_thread = threading.Thread(target=check_reminders, args=(db,), daemon=True)
+        reminder_thread.start()
+    except Exception as _e:
+        # Non-fatal; continue without reminders if thread fails to start
+        print("Warning: failed to start reminder watcher:", _e)
     
     # Tick callback for audible countdowns in voice mode
     def tick_cb(remaining: int, total: int, label: str):
@@ -498,11 +569,204 @@ def main():
                 speak("Please tell me your name first. Say: I am Abhiram")
                 continue
 
+            # Structured intent routing first
+            intent_obj = parse_intent(user_input)
+            if intent_obj:
+                it = intent_obj.get("intent")
+                params = intent_obj.get("params", {})
+                if it == "RUN_CMD":
+                    result = run_system_command(params.get("command", ""))
+                    speak(result)
+                    continue
+                if it == "REMINDER":
+                    text = params.get("text")
+                    when = params.get("when")
+                    if text and when:
+                        save_reminder(db, text, when)
+                        speak(f"Reminder saved for {when.strftime('%I:%M %p on %b %d')}: {text}")
+                    else:
+                        speak("I couldn't parse the reminder time. Try: 'remind me to call Yash at 3:07 pm today'.")
+                    continue
+                if it == "SHOW_APPS":
+                    apps = list_running_apps()
+                    if apps:
+                        print("\n--- Running Apps ---")
+                        for i, a in enumerate(apps, 1):
+                            print(f"{i:>2}. {a}")
+                    else:
+                        print("No user applications detected.")
+                    continue
+                if it == "BLOCK_APP":
+                    names = params.get("names") or []
+                    sec = int(params.get("seconds") or 30)
+                    if not names:
+                        # fall back to interactive multiple selection
+                        apps = list_running_apps()
+                        if not apps:
+                            speak("I couldn't find any running apps to block.")
+                            continue
+                        print("\nSelect one or more apps to block (comma-separated):")
+                        for i, a in enumerate(apps, 1):
+                            print(f"  {i}. {a}")
+                        sel = input("Enter numbers or names (comma-separated): ").strip()
+                        raw_parts = [p.strip() for p in sel.split(',') if p.strip()]
+                        chosen = []
+                        for p in raw_parts:
+                            if p.isdigit():
+                                idx = max(1, min(int(p), len(apps)))
+                                chosen.append(apps[idx-1])
+                            else:
+                                chosen.append(p)
+                        # dedupe
+                        seen = set(); chosen_unique = []
+                        for name in chosen:
+                            k = name.lower()
+                            if k not in seen:
+                                seen.add(k); chosen_unique.append(name)
+                        if not chosen_unique:
+                            speak("No valid app selection provided.")
+                            continue
+                        names = chosen_unique
+                    if len(names) == 1:
+                        result = block_app_by_name(names[0], sec, tick_callback=tick_cb, label=names[0])
+                    else:
+                        result = block_apps_by_names(names, sec, tick_callback=tick_cb, label=", ".join(names[:2]) + (" ..." if len(names) > 2 else ""))
+                    speak(result)
+                    try:
+                        log_action(f"Blocked apps intent: {names} for {sec}s")
+                    except Exception:
+                        pass
+                    continue
+                if it == "TASK_ADD":
+                    task = params.get("title")
+                    if task:
+                        save_task(db, task, user_id=current_user_id)
+                        log_action(f"{current_user_name} added task: '{task}'")
+                        speak(f"Task '{task}' added for {current_user_name}.")
+                    else:
+                        speak("Please provide a task title.")
+                    continue
+                if it == "TASK_SHOW":
+                    show_tasks(db, current_user_id)
+                    continue
+                if it == "TASK_DELETE":
+                    ident = params.get("identifier")
+                    success = delete_task(db, ident)
+                    if success:
+                        log_action(f"Deleted task id {ident}")
+                        speak(f"Task '{ident}' deleted.")
+                    else:
+                        speak(f"Task '{ident}' not found.")
+                    continue
+                if it == "SHOW_REMINDERS":
+                    show_reminders(db)
+                    continue
+                if it == "SHOW_CONVERSATIONS":
+                    show_conversations(db)
+                    continue
+                if it == "SHOW_HISTORY":
+                    history = fetch_conversation_history(db)
+                    if history:
+                        print("\n--- Conversation History ---")
+                        for user, assistant, ts in reversed(history):
+                            print(f"[{ts}] You: {user}")
+                            print(f"[{ts}] Assistant: {assistant}\n")
+                    else:
+                        print("No previous conversations found.")
+                    continue
+            # Vision controls (fast-path)
+            simple = user_input.lower().strip()
+            if simple in [
+                "start vision", "start camera", "start object detection", "enable vision"
+            ]:
+                if vision_running():
+                    speak_no_prefix("Vision is already running.")
+                else:
+                    start_vision(project_root, speak_no_prefix, camera_index=0)
+                continue
+            if simple in [
+                "stop vision", "stop camera", "disable vision"
+            ]:
+                if vision_running():
+                    stop_vision(project_root, speak_no_prefix)
+                else:
+                    speak_no_prefix("Vision is not running.")
+                continue
+            # Plain stop/q should stop vision if it's running
+            if simple in ["stop", "q", "esc", "escape"]:
+                if vision_running():
+                    stop_vision(project_root, speak_no_prefix)
+                    continue
+            if simple in [
+                "what do you see", "describe scene", "what can you see", "describe frame"
+            ]:
+                describe_frame(project_root, speak_no_prefix)
+                continue
             # Fast-path handlers for common commands
             if user_input.lower().strip() in [
                 "show tasks", "show task", "list tasks", "list task"
             ]:
                 show_tasks(db, current_user_id)
+                continue
+
+            # Long-term memory commands (moved here from top-level)
+            if user_input.lower().startswith("remember "):
+                content = user_input[9:].strip()
+                # strip common prefixes
+                for p in ["that ", "this ", ": ", "- "]:
+                    if content.lower().startswith(p.strip()):
+                        content = content[len(p):].strip()
+                        break
+                if not content:
+                    speak("What should I remember?")
+                    continue
+                mem_id = save_memory(content, user_id=current_user_id, tags=None)
+                if mem_id > 0:
+                    speak(f"Okay, I will remember that. (id {mem_id})")
+                else:
+                    speak("I couldn't save that memory.")
+                continue
+
+            if user_input.lower() in ["show memories", "list memories"]:
+                rows = get_recent_memories(current_user_id, limit=20)
+                if rows:
+                    print("\n--- Memories ---")
+                    print(f"{'ID':<5} {'When':<20} {'Content'}")
+                    print("-"*80)
+                    for r in rows:
+                        when = str(r.get('created_at', ''))
+                        print(f"{r['id']:<5} {when:<20} {r['content']}")
+                else:
+                    print("No memories saved yet.")
+                continue
+
+            if user_input.lower().startswith("find memory "):
+                q = user_input[12:].strip()
+                rows = search_memories(q, user_id=current_user_id, limit=10)
+                if rows:
+                    print("\n--- Memory Search ---")
+                    print(f"{'ID':<5} {'When':<20} {'Content'}")
+                    print("-"*80)
+                    for r in rows:
+                        when = str(r.get('created_at', ''))
+                        print(f"{r['id']:<5} {when:<20} {r['content']}")
+                else:
+                    print("No matching memories found.")
+                continue
+
+            if user_input.lower().startswith("forget "):
+                ident = user_input[7:].strip()
+                if ident.isdigit():
+                    ok = delete_memory_by_id(int(ident))
+                    speak("Forgotten." if ok else "I couldn't find that memory.")
+                else:
+                    # Try fuzzy search and delete first result
+                    rows = search_memories(ident, user_id=current_user_id, limit=1)
+                    if rows:
+                        ok = delete_memory_by_id(rows[0]['id'])
+                        speak("Forgotten." if ok else "I couldn't delete that memory.")
+                    else:
+                        speak("I couldn't find a matching memory.")
                 continue
 
             # List running apps
@@ -603,8 +867,12 @@ def main():
                     pass
                 continue
 
-            # Parse command
-            action, target, extra = parse_command(user_input)
+            # Parse command (be tolerant if parser returns None)
+            parsed = parse_command(user_input)
+            if parsed is None:
+                action, target, extra = "", "", ""
+            else:
+                action, target, extra = parsed
 
             # Show tasks done today (for active user)
             if ("what task i have done today" in user_input.lower() or
@@ -756,13 +1024,17 @@ def main():
             elif user_input.lower().startswith("delete reminder "):
                 speak("Delete reminder by ID or text is not implemented.")
 
-            elif user_input.lower().startswith("remind me to"):
+            elif ("remind" in user_input.lower()) or ("rmind" in user_input.lower()):
+                # Try strict pattern first
                 text, remind_time = parse_reminder(user_input)
+                if not (text and remind_time):
+                    # Fall back to natural parsing with dateparser
+                    text, remind_time = parse_reminder_natural(user_input)
                 if text and remind_time:
                     save_reminder(db, text, remind_time)
-                    speak(f"Reminder saved for {remind_time.strftime('%I:%M %p')}: {text}")
+                    speak(f"Reminder saved for {remind_time.strftime('%I:%M %p on %b %d')}: {text}")
                 else:
-                    speak("Sorry, I couldn't understand the reminder time.")
+                    speak("I couldn't parse the reminder. Try: 'remind me to call Yash at 3:07 pm today'.")
 
             elif user_input.lower() == "show system logs":
                 logs = get_system_logs()
@@ -788,7 +1060,23 @@ def main():
                     print("Assistant: Please specify the reminder.")
 
             else:
-                response = ask_ai(user_input)
+                # Enhance AI response with short conversation memory and a guiding system prompt
+                try:
+                    history = fetch_conversation_history(db, limit=20)
+                except Exception:
+                    history = []
+                # Retrieve a few relevant memories based on current query
+                try:
+                    mem_rows = search_memories(user_input, user_id=current_user_id, limit=5)
+                except Exception:
+                    mem_rows = []
+                mem_context = "\n".join([f"- {m['content']}" for m in mem_rows]) if mem_rows else ""
+                system_msg = (
+                    f"You are an offline assistant for {current_user_name}. "
+                    f"Use recent context and the following user memories when helpful, be concise, and ask a clarifying question if needed.\n"
+                    + ("User memories:\n" + mem_context if mem_context else "")
+                )
+                response = ask_ai(user_input, history=history, system=system_msg)
                 speak(response)
                 save_conversation(db, user_input, response)
         

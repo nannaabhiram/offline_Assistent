@@ -1,5 +1,6 @@
 import os
 import time
+import subprocess
 from typing import List, Tuple
 
 import psutil
@@ -11,11 +12,32 @@ except Exception:
     ctypes = None
 
 def run_system_command(command):
+    """Run a system command and return a detailed result.
+
+    - Captures stdout and stderr.
+    - Returns non-zero exit codes as errors with captured output.
+    - Uses shell execution so common commands (PowerShell/CMD) work on Windows.
+    """
     try:
-        os.system(command)
-        return f"Executed: {command}"
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+        )
+        out = (result.stdout or '').strip()
+        err = (result.stderr or '').strip()
+        if result.returncode == 0:
+            # Prefer stdout if available, otherwise a generic success message
+            if out:
+                return out
+            return f"Command succeeded: {command}"
+        else:
+            # Include both stdout and stderr for better diagnostics
+            combined = "\n".join([p for p in [out, err] if p]) or "No output captured."
+            return f"Command failed (exit {result.returncode}): {command}\n{combined}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error running command: {e}"
 
 
 def list_running_apps() -> List[str]:
