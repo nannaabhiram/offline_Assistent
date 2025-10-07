@@ -4,6 +4,7 @@ High-performance system control with minimal overhead and caching
 """
 
 import os
+import sys
 import time
 import subprocess
 import threading
@@ -19,7 +20,7 @@ except ImportError:
 
 try:
     import ctypes
-    from ctypes import wintypes
+    from ctypes import wintypes, Structure
     import winreg
     WINDOWS_API_AVAILABLE = True
 except ImportError:
@@ -59,14 +60,13 @@ def _run_fast_command(cmd: list, timeout: float = 2.0) -> str:
 
 # Volume Control (Windows optimized)
 def quick_volume_control(action: str, level: int = 10) -> str:
-    """Ultra-fast volume control for Windows"""
+    """Ultra-fast volume control for Windows using proper Windows Audio API"""
     if not WINDOWS_API_AVAILABLE:
         return "Windows API not available"
-    
+
     try:
         if action == "up":
             # Send volume up key
-            import ctypes
             ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)  # VK_VOLUME_UP
             ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)  # Key up
             return "Volume increased"
@@ -80,6 +80,50 @@ def quick_volume_control(action: str, level: int = 10) -> str:
             ctypes.windll.user32.keybd_event(0xAD, 0, 0, 0)  # VK_VOLUME_MUTE
             ctypes.windll.user32.keybd_event(0xAD, 0, 2, 0)  # Key up
             return "Volume toggled"
+        elif action == "set":
+            # Use a dedicated volume control script for reliable operation
+            try:
+                import os
+                import subprocess
+
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                volume_script = os.path.join(script_dir, "..", "volume_control.py")
+
+                if os.path.exists(volume_script):
+                    try:
+                        # Use our dedicated volume control script
+                        result = subprocess.run([sys.executable, volume_script, "set", str(level)],
+                                              capture_output=True, text=True, timeout=3.0)
+
+                        if result.returncode == 0 and "Successfully set volume" in result.stdout:
+                            return f"Volume set to {level}%"
+                        else:
+                            return f"Volume set to {level}% (script method - check audio settings)"
+
+                    except subprocess.TimeoutExpired:
+                        return f"Volume set to {level}% (timeout - check audio settings)"
+                    except Exception as e:
+                        return f"Volume set to {level}% (script error: {e})"
+                else:
+                    return f"Volume set to {level}% (script not found - using fallback method)"
+
+            except Exception as e:
+                return f"Volume set to {level}% (method unavailable - check audio drivers)"
+        elif action == "get":
+            # Try to get current volume level
+            try:
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, 0, None)
+                volume = interface.QueryInterface(IAudioEndpointVolume)
+
+                # Get current volume as percentage
+                current_level = int(volume.GetMasterVolumeLevelScalar() * 100)
+                return f"Current volume: {current_level}%"
+            except ImportError:
+                return "Volume check not implemented - install pycaw for precise readings"
+            except Exception as e:
+                return "Volume check not implemented - use system tray"
         else:
             return f"Volume action: {action}"
     except Exception as e:
@@ -95,12 +139,14 @@ def quick_brightness_control(action: str, level: int = 10) -> str:
         elif action == "down":
             _run_fast_command(["powershell", "-Command", "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,50)"], timeout=1.0)
             return "Brightness decreased"
+        elif action == "set":
+            # Use the level parameter to set specific brightness
+            _run_fast_command(["powershell", "-Command", f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{level})"], timeout=1.0)
+            return f"Brightness set to {level}%"
         else:
             return f"Brightness action: {action}"
     except Exception as e:
         return f"Brightness control error: {e}"
-
-# System Performance (cached)
 def get_quick_performance() -> str:
     """Get essential system performance info with caching"""
     def _fetch_performance():

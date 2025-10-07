@@ -5,16 +5,16 @@ import time
 
 # Performance cache for common queries
 _response_cache = {}
-_cache_timeout = 300  # 5 minutes
+_cache_timeout = 60  # 5 minutes
 
 # Common question patterns with fast responses
 QUICK_RESPONSES = {
-    "python programming": "Python is a popular, easy-to-learn programming language known for its simple syntax and powerful libraries. It's great for beginners and used in web development, data science, AI, and automation.",
-    "computers work": "Computers work by processing data through the CPU, storing information in memory and storage, and using input/output devices. The operating system manages resources while applications provide specific functionality.",
-    "artificial intelligence": "AI is technology that enables machines to perform tasks requiring human-like intelligence, such as learning, reasoning, and pattern recognition. It uses algorithms and data to make decisions.",
-    "machine learning": "Machine Learning is a subset of AI where computers learn patterns from data without explicit programming. It's used in recommendations, predictions, and automated decision-making.",
-    "who made you": "I was created by Abhiram. I'm an offline AI assistant built with Python and local libraries to run without the internet.",
-    "how were you made": "I was created by Abhiram using Python, Ollama for local AI, MySQL for data storage, and various system control libraries for comprehensive laptop management."
+    "python programming": "Python is a popular programming language - simple syntax, powerful libraries, great for beginners and experts alike.",
+    "computers work": "Computers process data through the CPU, store info in memory/storage, and use input/output devices. The OS manages everything while apps provide specific functions.",
+    "artificial intelligence": "AI enables machines to perform human-like tasks using algorithms and data to learn, reason, and make decisions.",
+    "machine learning": "Machine Learning is AI where computers learn patterns from data without explicit programming - used for recommendations and predictions.",
+    "who made you": "I was created by Abhiram using Python and local AI models.",
+    "how were you made": "Built with Python, Ollama for local AI, MySQL for data, and system control libraries for laptop management."
 }
 
 def get_quick_response(prompt: str) -> Optional[str]:
@@ -39,20 +39,19 @@ def _format_history(history: List[Tuple[str, str, str]], max_chars: int = 1500) 
     text = "\n".join(parts)
     if len(text) > max_chars:
         text = text[-max_chars:]
-        first_nl = text.find("\n")
         if first_nl != -1:
             text = text[first_nl+1:]
     return text
 
 
 def ask_ai(prompt: str, *, history: Optional[List[Tuple[str, str, str]]] = None,
-           system: Optional[str] = None, model: str = "phi3:latest", timeout: int = 8) -> str:
+           system: Optional[str] = None, model: str = "llama3.2:1b", timeout: int = 5) -> str:
     """Call local LLM with optimizations for speed"""
     
     # Check for quick responses first
     quick_response = get_quick_response(prompt)
     if quick_response:
-        return f"Hello Abhi Ram! {quick_response}"
+        return quick_response
     
     # Check cache
     cache_key = f"{prompt[:100]}_{model}"
@@ -68,7 +67,7 @@ def ask_ai(prompt: str, *, history: Optional[List[Tuple[str, str, str]]] = None,
         context = _format_history(history or [])
         
         # Shorter system message for faster processing
-        sys_text = system or "You are Abhi Ram's offline assistant. Be concise and helpful."
+        sys_text = system or "You are a helpful AI assistant. Be concise, natural, and direct like Google Assistant."
         
         # Simplified prompt structure
         if context:
@@ -83,10 +82,10 @@ def ask_ai(prompt: str, *, history: Optional[List[Tuple[str, str, str]]] = None,
                 "model": model, 
                 "prompt": composite_prompt,
                 "options": {
-                    "num_predict": 150,  # Limit response length for speed
-                    "temperature": 0.7,   # Reduce randomness for faster generation
-                    "top_k": 20,         # Reduce choices for speed
-                    "top_p": 0.9         # Focus on likely tokens
+                    "num_predict": 40,  # Even shorter for speed with fast model
+                    "temperature": 0.1,   # More consistent, faster generation
+                    "top_k": 15,         # Fewer choices for speed
+                    "top_p": 0.8         # Focus on likely tokens
                 }
             },
             stream=True,

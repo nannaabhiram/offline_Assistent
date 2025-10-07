@@ -1,7 +1,10 @@
 import mysql.connector
+from mysql.connector import pooling
 from dotenv import load_dotenv
 import os
 import datetime
+import threading
+import time
 
 # Load env from project root regardless of current working directory
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -18,15 +21,39 @@ db = os.getenv("MYSQL_DB")
 if host in (".", "localhost"):
     host = "127.0.0.1"
 
+# Connection pool for better performance
+_connection_pool = None
+_pool_lock = threading.Lock()
+
+def get_connection_pool():
+    """Get or create a connection pool for better performance"""
+    global _connection_pool
+    with _pool_lock:
+        if _connection_pool is None:
+            try:
+                _connection_pool = pooling.MySQLConnectionPool(
+                    pool_name="assistant_pool",
+                    pool_size=5,  # Keep 5 connections in pool
+                    pool_reset_session=False,
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=password,
+                    database=db,
+                    autocommit=False  # We'll manage transactions manually
+                )
+            except Exception as e:
+                print("❌ Connection pool creation error:", e)
+                return None
+        return _connection_pool
+
 def get_db_connection():
+    """Get a connection from the pool"""
     try:
-        return mysql.connector.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            database=db
-        )
+        pool = get_connection_pool()
+        if pool is None:
+            return None
+        return pool.get_connection()
     except Exception as e:
         print("❌ Database connection error:", e)
         return None
@@ -35,61 +62,91 @@ def get_db_connection():
 # 🔹 TASKS
 def save_task(db, title, due_date=None, status="pending"):
     cursor = db.cursor()
-    cursor.execute(
-        "INSERT INTO tasks (title, status, due_date) VALUES (%s, %s, %s)",
-        (title, status, due_date),
-    )
-    db.commit()
+    try:
+        cursor.execute(
+            "INSERT INTO tasks (title, status, due_date) VALUES (%s, %s, %s)",
+            (title, status, due_date),
+        )
+        db.commit()
+    finally:
+        cursor.close()
 
 
 def get_tasks_on_date(date_str):
     db = get_db_connection()
+    if not db:
+        return []
     cursor = db.cursor(dictionary=True)
-    cursor.execute(
-        """
-        SELECT id, title, status, due_date
-        FROM tasks
-        WHERE DATE(created_at) = %s
-        """,
-        (date_str,),
-    )
-    return cursor.fetchall()
+    try:
+        cursor.execute(
+            """
+            SELECT id, title, status, due_date
+            FROM tasks
+            WHERE DATE(created_at) = %s
+            """,
+            (date_str,),
+        )
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        db.close()
 
 
 # 🔹 CONVERSATIONS
 def save_conversation(db, user_input, assistant_response):
     cursor = db.cursor()
-    cursor.execute(
-        "INSERT INTO conversations (user_input, assistant_response, timestamp) VALUES (%s, %s, %s)",
-        (user_input, assistant_response, datetime.datetime.now()),
-    )
-    db.commit()
+    try:
+        cursor.execute(
+            "INSERT INTO conversations (user_input, assistant_response, timestamp) VALUES (%s, %s, %s)",
+            (user_input, assistant_response, datetime.datetime.now()),
+        )
+        db.commit()
+    finally:
+        cursor.close()
 
 
 # 🔹 DELETED TASKS (for history)
 def get_deleted_tasks():
     db = get_db_connection()
+    if not db:
+        return []
     cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM deleted_tasks ORDER BY deleted_at DESC LIMIT 10")
-    return cursor.fetchall()
+    try:
+        cursor.execute("SELECT * FROM deleted_tasks ORDER BY deleted_at DESC LIMIT 10")
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        db.close()
 
 
 # 🔹 LOGS
 def log_action(action, status="success"):
     db = get_db_connection()
+    if not db:
+        return
     cursor = db.cursor()
-    cursor.execute(
-        "INSERT INTO system_logs (action, status, timestamp) VALUES (%s, %s, %s)",
-        (action, status, datetime.datetime.now()),
-    )
-    db.commit()
+    try:
+        cursor.execute(
+            "INSERT INTO system_logs (action, status, timestamp) VALUES (%s, %s, %s)",
+            (action, status, datetime.datetime.now()),
+        )
+        db.commit()
+    finally:
+        cursor.close()
+        db.close()
 
 
 def get_system_logs(limit=10):
     db = get_db_connection()
+    if not db:
+        return []
     cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT %s", (limit,))
-    return cursor.fetchall()
+    try:
+        cursor.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT %s", (limit,))
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        db.close()
 
 
 # 🔹 MEMORIES (long-term small facts)
