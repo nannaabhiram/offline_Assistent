@@ -8,9 +8,3 @@ spacy
 dateparser
 psutil
 bcrypt
-opencv-python
-numpy
-ultralytics
-torch
-torchvision
-torchaudio

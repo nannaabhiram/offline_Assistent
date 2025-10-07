@@ -28,25 +28,12 @@ CREATE TABLE IF NOT EXISTS system_logs (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create users table
-CREATE TABLE users (
-     id INT AUTO_INCREMENT PRIMARY KEY,
-     name VARCHAR(100) UNIQUE NOT NULL,
-     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Add user_id column to tasks table
-ALTER TABLE tasks ADD COLUMN user_id INT NULL;
-ALTER TABLE tasks ADD CONSTRAINT fk_tasks_user FOREIGN KEY (user_id) REFERENCES users(id);
-
-
 -- Track deleted tasks history
 CREATE TABLE IF NOT EXISTS deleted_tasks (
     id INT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     status ENUM('pending','done') DEFAULT 'pending',
     due_date DATETIME NULL,
-    user_id INT NULL,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

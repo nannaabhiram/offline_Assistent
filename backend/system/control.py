@@ -1,15 +1,32 @@
 import os
 import time
 import subprocess
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
+import json
+import winreg
+from pathlib import Path
 
 import psutil
 import sys
 import platform
 try:
     import ctypes  # for Windows admin check
+    from ctypes import wintypes
 except Exception:
     ctypes = None
+    wintypes = None
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+try:
+    import wmi
+    WMI_AVAILABLE = True
+except ImportError:
+    WMI_AVAILABLE = False
+    wmi = None
 
 def run_system_command(command):
     """Run a system command and return a detailed result.
