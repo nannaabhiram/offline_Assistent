@@ -8,3 +8,16 @@ spacy
 dateparser
 psutil
 bcrypt
+
+# Phone bridge dependencies
+opencv-python>=4.8.0
+qrcode>=7.3.1
+Pillow>=9.0.0
+pyzbar>=0.1.9
+SpeechRecognition>=3.8.1
+
+# Bluetooth dependencies (Windows)
+pybluez>=0.23; sys_platform == 'win32'
+
+# Optional: For enhanced Bluetooth support
+bleak>=0.19.0; sys_platform != 'win32'
