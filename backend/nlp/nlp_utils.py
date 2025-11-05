@@ -1,4 +1,7 @@
-import spacy
+try:
+    import spacy  # heavy dependency; may be unavailable in minimal envs
+except Exception:
+    spacy = None
 import re
 import datetime
 from typing import Optional, Dict, Any
@@ -7,14 +10,18 @@ try:
 except Exception:
     search_dates = None
 
-try:
-    nlp = spacy.load("en_core_web_sm")
-    _SPACY_AVAILABLE = True
-except Exception:
+if spacy is not None:
     try:
-        nlp = spacy.blank("en")
+        nlp = spacy.load("en_core_web_sm")
+        _SPACY_AVAILABLE = True
     except Exception:
-        nlp = None
+        try:
+            nlp = spacy.blank("en")
+        except Exception:
+            nlp = None
+        _SPACY_AVAILABLE = False
+else:
+    nlp = None
     _SPACY_AVAILABLE = False
 
 def parse_command(user_input: str):

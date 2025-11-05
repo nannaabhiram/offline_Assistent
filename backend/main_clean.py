@@ -8,6 +8,7 @@ import requests
 from dotenv import load_dotenv
 from ai.brain import ask_ai
 from dateparser.search import search_dates
+from speech.stt import listen_voice
 
 # Vision and face analysis
 from vision.face_analyzer import start_face_analysis, stop_face_analysis, get_current_analysis, detect_user_mood
@@ -276,6 +277,8 @@ def wait_for_ollama_server(timeout=10):
 # Initialize text-to-speech (lazy initialization)
 engine = None
 tts_lock = threading.Lock()
+interrupt_flag = threading.Event()
+is_speaking = threading.Event()
 
 
 def get_tts_engine():
@@ -290,15 +293,63 @@ def get_tts_engine():
     return engine
 
 
+def interrupt_listener(mode):
+    """Background thread that listens for 'hey wait' to interrupt speech"""
+    global interrupt_flag, is_speaking
+    
+    if mode != "voice":
+        return
+    
+    try:
+        from speech.stt import listen_for_interrupt
+    except ImportError:
+        return
+    
+    while True:
+        try:
+            if is_speaking.is_set():
+                # Only listen for interrupts while speaking
+                text = listen_for_interrupt()
+                if text and any(phrase in text.lower() for phrase in ["hey wait", "wait", "stop", "hey stop"]):
+                    print("🛑 Interrupt detected: Stopping speech...")
+                    interrupt_flag.set()
+                    # Try to stop current utterance immediately
+                    try:
+                        eng = get_tts_engine()
+                        if eng:
+                            eng.stop()
+                    except Exception:
+                        pass
+            else:
+                time.sleep(0.1)
+        except Exception as e:
+            print(f"Interrupt listener error: {e}")
+            time.sleep(0.5)
+
+
 def speak(text):
     print(f"Assistant: {text}")
     try:
         tts_engine = get_tts_engine()
         if tts_engine:
             with tts_lock:
-                tts_engine.say(text)
-                tts_engine.runAndWait()
+                interrupt_flag.clear()
+                is_speaking.set()
+                
+                # Split text into sentences for interruptible speech
+                sentences = text.replace('!', '.').replace('?', '.').split('.')
+                sentences = [s.strip() for s in sentences if s.strip()]
+                
+                for sentence in sentences:
+                    if interrupt_flag.is_set():
+                        print("⏸️ Speech interrupted by user")
+                        break
+                    tts_engine.say(sentence)
+                    tts_engine.runAndWait()
+                
+                is_speaking.clear()
     except Exception:
+        is_speaking.clear()
         pass
 
 
@@ -308,9 +359,23 @@ def speak_no_prefix(text):
         tts_engine = get_tts_engine()
         if tts_engine:
             with tts_lock:
-                tts_engine.say(text)
-                tts_engine.runAndWait()
+                interrupt_flag.clear()
+                is_speaking.set()
+                
+                # Split text into sentences for interruptible speech
+                sentences = text.replace('!', '.').replace('?', '.').split('.')
+                sentences = [s.strip() for s in sentences if s.strip()]
+                
+                for sentence in sentences:
+                    if interrupt_flag.is_set():
+                        print("⏸️ Speech interrupted by user")
+                        break
+                    tts_engine.say(sentence)
+                    tts_engine.runAndWait()
+                
+                is_speaking.clear()
     except Exception:
+        is_speaking.clear()
         pass
 
 
@@ -410,6 +475,12 @@ def main():
     mode = input("Choose mode (cli/voice): ").strip().lower()
     if mode not in ["cli", "voice"]:
         mode = "cli"
+
+    # Start interrupt listener for voice mode
+    if mode == "voice":
+        interrupt_thread = threading.Thread(target=interrupt_listener, args=(mode,), daemon=True)
+        interrupt_thread.start()
+        print("✅ Voice interrupt feature activated! Say 'hey wait' to interrupt.")
 
     # Start reminder watcher in the background
     try:

@@ -45,7 +45,7 @@ def _format_history(history: List[Tuple[str, str, str]], max_chars: int = 1500) 
 
 
 def ask_ai(prompt: str, *, history: Optional[List[Tuple[str, str, str]]] = None,
-           system: Optional[str] = None, model: str = "llama3.2:1b", timeout: int = 5) -> str:
+           system: Optional[str] = None, model: str = "llama3.2:1b", timeout: int = 12) -> str:
     """Call local LLM with optimizations for speed"""
     
     # Check for quick responses first
