@@ -1,6 +1,11 @@
 import os
+import sys
 import time
 import threading
+import tempfile
+import asyncio
+import subprocess
+import shutil
 import pyttsx3
 import re
 import datetime
@@ -13,7 +18,13 @@ from speech.stt import listen_voice
 # Vision and face analysis
 from vision.face_analyzer import start_face_analysis, stop_face_analysis, get_current_analysis, detect_user_mood
 from nlp.nlp_utils import parse_intent
-from system.control import run_system_command, list_running_apps, block_app_by_name, block_apps_by_names
+
+# Old system control functions (for app blocking, etc.)
+from system.system_control import run_system_command, list_running_apps, block_app_by_name, block_apps_by_names
+
+# New dynamic automation system
+from system.automation_controller import execute_command as run_automation_command, is_automation_command
+
 from system.optimized_control import (
     quick_process_kill, execute_fast_command, quick_volume_control,
     quick_brightness_control, quick_power_action, quick_app_launch,
@@ -25,6 +36,31 @@ from db.db_connection import (
     # Memory helpers
     ensure_memories_table, save_memory, get_recent_memories, search_memories, delete_memory_by_id
 )
+
+# RAG functionality
+RAG_AVAILABLE = False
+rag_module = None
+try:
+    from ai.rag import get_rag_status, activate_online_mode_with_wifi
+    import ai.rag as rag_module
+    RAG_AVAILABLE = True
+    print("✅ RAG system loaded successfully")
+except ImportError as e:
+    print(f"⚠️ RAG not available: {e}")
+except Exception as e:
+    print(f"⚠️ RAG loading error: {e}")
+
+# Advanced Automation - New Dynamic System
+AUTOMATION_AVAILABLE = True  # Always available with new system
+try:
+    import pyautogui
+    MOUSE_KEYBOARD_AVAILABLE = True
+    print("✅ New dynamic automation system loaded")
+    print("   ✓ Mouse & Keyboard control enabled")
+except ImportError:
+    MOUSE_KEYBOARD_AVAILABLE = False
+    print("✅ New dynamic automation system loaded")
+    print("   ⚠️ Mouse & Keyboard control disabled (install pyautogui)")
 
 def show_tasks(db):
     cursor = db.cursor()
@@ -280,17 +316,118 @@ tts_lock = threading.Lock()
 interrupt_flag = threading.Event()
 is_speaking = threading.Event()
 
+# Optional edge-tts fallback
+EDGE_TTS_AVAILABLE = False
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except Exception:
+    EDGE_TTS_AVAILABLE = False
+
 
 def get_tts_engine():
     """Get TTS engine with lazy initialization"""
     global engine
     if engine is None:
         try:
-            engine = pyttsx3.init()
+            # On Windows prefer sapi5 for lower latency and better voices
+            if sys.platform.startswith('win'):
+                try:
+                    engine = pyttsx3.init('sapi5')
+                except Exception:
+                    engine = pyttsx3.init()
+            else:
+                engine = pyttsx3.init()
+            # Tune default properties to reduce perceived latency and increase clarity
+            try:
+                # Slightly faster in FAST_MODE
+                fast = os.getenv('FAST_MODE', '').strip() not in ('', '0', 'false', 'False')
+                engine.setProperty('rate', 220 if fast else 200)
+            except Exception:
+                pass
+            try:
+                engine.setProperty('volume', 1.0)
+            except Exception:
+                pass
+            # Prefer the first available voice if any
+            try:
+                voices = engine.getProperty('voices')
+                if voices:
+                    engine.setProperty('voice', voices[0].id)
+            except Exception:
+                pass
         except Exception as e:
             print(f"Warning: TTS initialization failed: {e}")
             return None
     return engine
+
+
+def tts_test_phrase(phrase: str = "TTS test, one two three"):
+    """Directly use engine to say a short test phrase synchronously for diagnostics."""
+    eng = get_tts_engine()
+    if not eng:
+        print("TTS engine not available. Please install 'pyttsx3' and ensure your audio device works.")
+        return {"success": False, "message": "TTS engine not available"}
+    try:
+        with tts_lock:
+            eng.say(phrase)
+            eng.runAndWait()
+        return {"success": True, "message": "TTS playback succeeded"}
+    except Exception as e:
+        return {"success": False, "message": f"TTS playback failed: {e}"}
+
+
+def _edge_speak_worker(text: str):
+    """Synthesize using edge-tts to a temporary mp3 and launch default player (non-blocking).
+    This is a best-effort fallback when pyttsx3 isn't working. It requires `edge-tts` package
+    and an available system player. The function will return quickly and leave playback to
+    the OS default app launched by cmd 'start'."""
+    try:
+        # Create a temp file path
+        tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tf_path = tf.name
+        tf.close()
+
+        # Use edge_tts Communicate to save to file
+        async def synth_to_file(t, out_path):
+            comm = edge_tts.Communicate(t, voice="en-US-GuyNeural")
+            await comm.save(out_path)
+
+        try:
+            asyncio.run(synth_to_file(text, tf_path))
+        except Exception:
+            # cleanup and abort
+            try:
+                os.unlink(tf_path)
+            except Exception:
+                pass
+            return
+
+        # Launch default player in a non-blocking way (Windows 'start' via cmd)
+        try:
+            if sys.platform.startswith('win'):
+                # cmd start requires shell; use /c start "" "file"
+                subprocess.Popen(["cmd", "/c", "start", "", tf_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                # For Unix fallback, try xdg-open or open
+                opener = shutil.which('xdg-open') or shutil.which('open')
+                if opener:
+                    subprocess.Popen([opener, tf_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+        # Schedule deletion after a delay in background
+        def _cleanup(path):
+            try:
+                time.sleep(30)
+                os.unlink(path)
+            except Exception:
+                pass
+
+        cleanup_thread = threading.Thread(target=_cleanup, args=(tf_path,), daemon=True)
+        cleanup_thread.start()
+    except Exception:
+        pass
 
 
 def interrupt_listener(mode):
@@ -328,54 +465,118 @@ def interrupt_listener(mode):
 
 
 def speak(text):
+    """Print assistant text and speak asynchronously (non-blocking)."""
     print(f"Assistant: {text}")
-    try:
-        tts_engine = get_tts_engine()
-        if tts_engine:
+
+    def _speak_worker(t: str):
+        try:
+            tts_engine = get_tts_engine()
+            if not tts_engine:
+                return
             with tts_lock:
                 interrupt_flag.clear()
                 is_speaking.set()
-                
-                # Split text into sentences for interruptible speech
-                sentences = text.replace('!', '.').replace('?', '.').split('.')
+                # Split text into sentences
+                sentences = t.replace('!', '.').replace('?', '.').split('.')
                 sentences = [s.strip() for s in sentences if s.strip()]
-                
+
+                # Queue all sentences first, then run once to avoid per-sentence overhead
                 for sentence in sentences:
                     if interrupt_flag.is_set():
                         print("⏸️ Speech interrupted by user")
                         break
                     tts_engine.say(sentence)
+
+                # Run queued utterances in one call to reduce startup overhead
+                try:
                     tts_engine.runAndWait()
-                
+                except Exception:
+                    # Some engines may fail for queued batches; attempt single-run fallback
+                    for sentence in sentences:
+                        if interrupt_flag.is_set():
+                            break
+                        tts_engine.say(sentence)
+                        tts_engine.runAndWait()
+
                 is_speaking.clear()
+        except Exception:
+            try:
+                is_speaking.clear()
+            except Exception:
+                pass
+
+    # Run TTS in a daemon thread so CLI remains responsive
+    try:
+        # Ensure engine exists; try a synchronous init to improve chance of immediate playback
+        if get_tts_engine() is None:
+            # If pyttsx3 isn't available but edge-tts is, use edge-tts fallback
+            if EDGE_TTS_AVAILABLE:
+                try:
+                    t = threading.Thread(target=_edge_speak_worker, args=(text,), daemon=True)
+                    t.start()
+                    return
+                except Exception:
+                    pass
+            print("⚠️ TTS not initialized. Speech will be printed only. To enable audio, install pyttsx3 and check audio device.")
+            return
+        thread = threading.Thread(target=_speak_worker, args=(text,), daemon=True)
+        thread.start()
     except Exception:
-        is_speaking.clear()
         pass
 
 
 def speak_no_prefix(text):
-    print(f"Assistant: {text}")
-    try:
-        tts_engine = get_tts_engine()
-        if tts_engine:
+    # Print without extra prefix
+    print(f"{text}")
+
+    def _speak_worker_no_prefix(t: str):
+        try:
+            tts_engine = get_tts_engine()
+            if not tts_engine:
+                return
             with tts_lock:
                 interrupt_flag.clear()
                 is_speaking.set()
-                
-                # Split text into sentences for interruptible speech
-                sentences = text.replace('!', '.').replace('?', '.').split('.')
+
+                sentences = t.replace('!', '.').replace('?', '.').split('.')
                 sentences = [s.strip() for s in sentences if s.strip()]
-                
+
                 for sentence in sentences:
                     if interrupt_flag.is_set():
                         print("⏸️ Speech interrupted by user")
                         break
                     tts_engine.say(sentence)
+
+                try:
                     tts_engine.runAndWait()
-                
+                except Exception:
+                    for sentence in sentences:
+                        if interrupt_flag.is_set():
+                            break
+                        tts_engine.say(sentence)
+                        tts_engine.runAndWait()
+
                 is_speaking.clear()
+        except Exception:
+            try:
+                is_speaking.clear()
+            except Exception:
+                pass
+
+    try:
+        if get_tts_engine() is None:
+            if EDGE_TTS_AVAILABLE:
+                try:
+                    t = threading.Thread(target=_edge_speak_worker, args=(text,), daemon=True)
+                    t.start()
+                    return
+                except Exception:
+                    pass
+            print("⚠️ TTS not initialized. Speech will be printed only. To enable audio, install pyttsx3 and check audio device.")
+            return
+        thread = threading.Thread(target=_speak_worker_no_prefix, args=(text,), daemon=True)
+        thread.start()
     except Exception:
-        is_speaking.clear()
         pass
 
 
@@ -444,8 +645,18 @@ _memory_table_lock = threading.Lock()
 def main():
     print("🚀 Starting Offline AI Assistant...")
 
-    # Check if Ollama server is available before proceeding
-    if not wait_for_ollama_server():
+    # Warm up TTS engine in background so first speech has minimal latency
+    try:
+        tts_warm = threading.Thread(target=get_tts_engine, daemon=True)
+        tts_warm.start()
+    except Exception:
+        pass
+
+    # Fast mode option to reduce latency by skipping heavy features
+    FAST_MODE = os.getenv('FAST_MODE', '').strip() not in ('', '0', 'false', 'False')
+
+    # Check if Ollama server is available before proceeding (shorter wait in FAST_MODE)
+    if not wait_for_ollama_server(timeout=5 if FAST_MODE else 10):
         return
 
     db = get_db_connection()
@@ -459,12 +670,15 @@ def main():
     last_mood = None
     last_mood_confidence = 0.0
     try:
-        from vision.face_analyzer import start_face_analysis, stop_face_analysis, get_current_analysis, detect_user_mood
-        if start_face_analysis():
-            face_analysis_active = True
-            print("✅ Face analysis system activated!")
+        if not FAST_MODE:
+            from vision.face_analyzer import start_face_analysis, stop_face_analysis, get_current_analysis, detect_user_mood
+            if start_face_analysis():
+                face_analysis_active = True
+                print("✅ Face analysis system activated!")
+            else:
+                print("⚠️ Face analysis system not available (camera not found)")
         else:
-            print("⚠️ Face analysis system not available (camera not found)")
+            print("⏩ FAST_MODE: Skipping face analysis initialization")
     except ImportError as e:
         print(f"⚠️ Face analysis not available: {e}")
         face_analysis_active = False
@@ -482,10 +696,13 @@ def main():
         interrupt_thread.start()
         print("✅ Voice interrupt feature activated! Say 'hey wait' to interrupt.")
 
-    # Start reminder watcher in the background
+    # Start reminder watcher in the background (skip in FAST_MODE)
     try:
-        reminder_thread = threading.Thread(target=check_reminders, args=(db,), daemon=True)
-        reminder_thread.start()
+        if not FAST_MODE:
+            reminder_thread = threading.Thread(target=check_reminders, args=(db,), daemon=True)
+            reminder_thread.start()
+        else:
+            print("⏩ FAST_MODE: Reminder watcher disabled")
     except Exception as e:
         print("Warning: failed to start reminder watcher:", e)
 
@@ -535,6 +752,19 @@ def main():
             user_input = get_user_input(mode)
             if not user_input:
                 continue
+            # Quick diagnostic: TTS test
+            low_ins = user_input.lower().strip()
+            if low_ins in ["test tts", "tts test", "test-tts", "check tts"]:
+                res = tts_test_phrase()
+                if res.get("success"):
+                    print("TTS test succeeded.")
+                    speak("TTS test completed successfully.")
+                else:
+                    print(f"TTS test failed: {res.get('message')}")
+                    # still speak printed message (speak will detect TTS not initialized)
+                    speak(f"TTS test failed: {res.get('message')}")
+                continue
+            
             if user_input.lower() in ["exit", "quit", "bye"]:
                 speak("Goodbye!")
                 break
@@ -813,9 +1043,98 @@ def main():
                     print("Assistant: No logs found.")
                 continue
 
+            # RAG status command
+            if user_input.lower() in ["rag status", "check rag", "internet status"]:
+                if RAG_AVAILABLE:
+                    status = get_rag_status()
+                    status_msg = f"🌐 RAG System Status:\n"
+                    status_msg += f"   Enabled: {'✓ Yes' if status['enabled'] else '✗ No'}\n"
+                    status_msg += f"   API Configured: {'✓ Yes' if status['api_configured'] else '✗ No'}\n"
+                    status_msg += f"   Status: {status['status']}\n"
+                    status_msg += f"\n💡 RAG automatically enhances responses with real-time internet data when needed."
+                    speak(status_msg)
+                else:
+                    speak("RAG system is not available.")
+                continue
+
+            # Deactivate online mode (CHECK THIS FIRST before activate!)
+            if any(phrase in user_input.lower() for phrase in ["deactivate online mode", "disable online mode", "turn off online mode", "deactive online mode", "offline mode"]):
+                if RAG_AVAILABLE:
+                    rag_module.online_mode_active = False
+                    print("🔌 Deactivating online mode...")
+                    speak("Online mode deactivated. Switched back to offline mode.")
+                    log_action("Online mode deactivated")
+                else:
+                    speak("RAG system is not available.")
+                continue
+
+            # Activate online mode with smart WiFi connection
+            if any(phrase in user_input.lower() for phrase in ["active online mode", "activate online mode", "enable online mode", "turn on online mode", "online mode on"]):
+                if RAG_AVAILABLE:
+                    print("🔄 Checking WiFi and activating online mode...")
+                    result = activate_online_mode_with_wifi()
+                    
+                    if result['success']:
+                        speak(result['message'])
+                        log_action("Online mode activated with WiFi")
+                    else:
+                        speak(result['message'])
+                        log_action(f"Online mode activation failed: {result['wifi_status'].get('reason', 'Unknown')}")
+                else:
+                    speak("RAG system is not available.")
+                continue
+
+            # ============================================================================
+            # ADVANCED AUTOMATION COMMANDS
+            # ============================================================================
+            
+            # NEW DYNAMIC AUTOMATION SYSTEM
+            # Check if this is an automation command
+            if AUTOMATION_AVAILABLE and is_automation_command(user_input):
+                print(f"[DEBUG] Processing automation command: {user_input}")
+                result = run_automation_command(user_input)
+                print(f"[DEBUG] Command result: {result.get('success', False)}")
+                
+                if result['success']:
+                    # Handle special output formatting
+                    if 'files' in result:
+                        # File listing
+                        print(f"\n📁 Files:")
+                        for f in result['files'][:20]:
+                            print(f"  - {f}")
+                        if result.get('count', 0) > 20:
+                            print(f"  ... and {result['count'] - 20} more")
+                    elif 'processes' in result:
+                        # Process listing
+                        processes = result['processes']
+                        print(f"\n🔄 Running Processes ({len(processes)} total):")
+                        sorted_procs = sorted(processes, key=lambda x: x.get('cpu', 0) or 0, reverse=True)[:20]
+                        for proc in sorted_procs:
+                            print(f"  - {proc['name']} (PID: {proc['pid']}) - CPU: {proc.get('cpu', 0)}%")
+                    elif 'cpu' in result and 'memory' in result and 'disk' in result:
+                        # Full system status
+                        msg = f"System Overview:\n"
+                        msg += f"CPU: {result['cpu']['cpu_percent']}%\n"
+                        msg += f"Memory: {result['memory']['percent']}% ({result['memory']['used_gb']} GB used)\n"
+                        msg += f"Disk: {result['disk']['percent']}% ({result['disk']['free_gb']} GB free)\n"
+                        if result.get('battery', {}).get('has_battery'):
+                            msg += f"Battery: {result['battery']['percent']}% {'(charging)' if result['battery']['plugged_in'] else '(on battery)'}\n"
+                        print(msg)
+                    
+                    # Speak the message
+                    speak(result['message'])
+                    
+                    # Log app actions
+                    if 'open' in user_input.lower() or 'close' in user_input.lower():
+                        log_action(f"Automation: {user_input}")
+                else:
+                    speak(result['message'])
+                
+                continue
+
             # AI response fallback with mood awareness
             try:
-                history = fetch_conversation_history(db, limit=20)
+                history = fetch_conversation_history(db, limit=(5 if FAST_MODE else 20))
             except Exception:
                 history = []
             try:
@@ -870,7 +1189,18 @@ def main():
                 + mood_context
                 + ("User memories:\n" + mem_context if mem_context else "")
             )
+            # Show quick feedback so user knows model is generating (reduces perceived latency)
+            try:
+                print("[AI] Generating response...")
+            except Exception:
+                pass
+            _ai_t0 = time.time()
             response = ask_ai(user_input, history=history, system=system_msg)
+            _ai_t1 = time.time()
+            try:
+                print(f"[AI] Response generated in {_ai_t1 - _ai_t0:.2f}s")
+            except Exception:
+                pass
             speak(response)
             save_conversation(db, user_input, response)
 

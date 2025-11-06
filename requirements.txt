@@ -9,6 +9,9 @@ dateparser
 psutil
 bcrypt
 
+# Automation dependencies
+pyautogui>=0.9.50  # Optional: For mouse & keyboard control
+
 # Phone bridge dependencies
 opencv-python>=4.8.0
 qrcode>=7.3.1
