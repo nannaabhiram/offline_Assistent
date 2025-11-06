@@ -10,6 +10,11 @@ import time
 from typing import Dict, List, Tuple, Optional
 import json
 import os
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 # Initialize variables at module level
 MEDIAPIPE_AVAILABLE = False
@@ -24,11 +29,9 @@ try:
 except ImportError:
     mp = None
     MEDIAPIPE_AVAILABLE = False
-    print("⚠️ MediaPipe not available. Face analysis will use OpenCV only.")
 except Exception as e:
     mp = None
     MEDIAPIPE_AVAILABLE = False
-    print(f"⚠️ MediaPipe initialization failed: {e}. Using OpenCV only.")
 
 # Try to import dlib for better face detection
 try:
@@ -37,11 +40,9 @@ try:
 except ImportError:
     dlib = None
     DLIB_AVAILABLE = False
-    print("⚠️ dlib not available. Using basic OpenCV face detection.")
 except Exception as e:
     dlib = None
     DLIB_AVAILABLE = False
-    print(f"⚠️ dlib initialization failed: {e}. Using OpenCV only.")
 
 class FaceAnalyzer:
     def __init__(self):

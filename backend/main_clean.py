@@ -11,6 +11,13 @@ import re
 import datetime
 import requests
 from dotenv import load_dotenv
+
+# Suppress TensorFlow/MediaPipe warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 from ai.brain import ask_ai
 from dateparser.search import search_dates
 from speech.stt import listen_voice
@@ -326,40 +333,38 @@ except Exception:
 
 
 def get_tts_engine():
-    """Get TTS engine with lazy initialization"""
-    global engine
-    if engine is None:
-        try:
-            # On Windows prefer sapi5 for lower latency and better voices
-            if sys.platform.startswith('win'):
-                try:
-                    engine = pyttsx3.init('sapi5')
-                except Exception:
-                    engine = pyttsx3.init()
-            else:
+    """Get TTS engine - creates fresh instance each time to avoid reuse issues"""
+    try:
+        # On Windows prefer sapi5 for lower latency and better voices
+        if sys.platform.startswith('win'):
+            try:
+                engine = pyttsx3.init('sapi5')
+            except Exception:
                 engine = pyttsx3.init()
-            # Tune default properties to reduce perceived latency and increase clarity
-            try:
-                # Slightly faster in FAST_MODE
-                fast = os.getenv('FAST_MODE', '').strip() not in ('', '0', 'false', 'False')
-                engine.setProperty('rate', 220 if fast else 200)
-            except Exception:
-                pass
-            try:
-                engine.setProperty('volume', 1.0)
-            except Exception:
-                pass
-            # Prefer the first available voice if any
-            try:
-                voices = engine.getProperty('voices')
-                if voices:
-                    engine.setProperty('voice', voices[0].id)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"Warning: TTS initialization failed: {e}")
-            return None
-    return engine
+        else:
+            engine = pyttsx3.init()
+        # Tune default properties to reduce perceived latency and increase clarity
+        try:
+            # Slightly faster in FAST_MODE
+            fast = os.getenv('FAST_MODE', '').strip() not in ('', '0', 'false', 'False')
+            engine.setProperty('rate', 220 if fast else 200)
+        except Exception:
+            pass
+        try:
+            engine.setProperty('volume', 1.0)
+        except Exception:
+            pass
+        # Prefer the first available voice if any
+        try:
+            voices = engine.getProperty('voices')
+            if voices:
+                engine.setProperty('voice', voices[0].id)
+        except Exception:
+            pass
+        return engine
+    except Exception as e:
+        print(f"❌ TTS initialization failed: {e}")
+        return None
 
 
 def tts_test_phrase(phrase: str = "TTS test, one two three"):
@@ -469,6 +474,7 @@ def speak(text):
     print(f"Assistant: {text}")
 
     def _speak_worker(t: str):
+        tts_engine = None
         try:
             tts_engine = get_tts_engine()
             if not tts_engine:
@@ -476,34 +482,41 @@ def speak(text):
             with tts_lock:
                 interrupt_flag.clear()
                 is_speaking.set()
-                # Split text into sentences
-                sentences = t.replace('!', '.').replace('?', '.').split('.')
-                sentences = [s.strip() for s in sentences if s.strip()]
-
-                # Queue all sentences first, then run once to avoid per-sentence overhead
-                for sentence in sentences:
-                    if interrupt_flag.is_set():
-                        print("⏸️ Speech interrupted by user")
-                        break
-                    tts_engine.say(sentence)
-
-                # Run queued utterances in one call to reduce startup overhead
+                
                 try:
+                    # Speak the entire text at once instead of splitting into sentences
+                    # This avoids issues with queued utterances not playing completely
+                    print(f"🔊 Speaking...")
+                    tts_engine.say(t)
                     tts_engine.runAndWait()
-                except Exception:
-                    # Some engines may fail for queued batches; attempt single-run fallback
-                    for sentence in sentences:
-                        if interrupt_flag.is_set():
-                            break
-                        tts_engine.say(sentence)
-                        tts_engine.runAndWait()
+                    print(f"✅ Speech completed")
+                except Exception as e:
+                    print(f"⚠️ TTS playback error: {e}")
+                finally:
+                    # Clean up engine after each use to avoid reuse issues
+                    try:
+                        tts_engine.stop()
+                    except:
+                        pass
+                    try:
+                        del tts_engine
+                    except:
+                        pass
 
                 is_speaking.clear()
-        except Exception:
+        except Exception as ex:
+            print(f"⚠️ Speech worker error: {ex}")
             try:
                 is_speaking.clear()
             except Exception:
                 pass
+        finally:
+            # Ensure cleanup even if exception occurs
+            if tts_engine:
+                try:
+                    del tts_engine
+                except:
+                    pass
 
     # Run TTS in a daemon thread so CLI remains responsive
     try:
@@ -521,8 +534,8 @@ def speak(text):
             return
         thread = threading.Thread(target=_speak_worker, args=(text,), daemon=True)
         thread.start()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ Failed to start speech thread: {e}")
 
 
 def speak_no_prefix(text):
@@ -530,6 +543,7 @@ def speak_no_prefix(text):
     print(f"{text}")
 
     def _speak_worker_no_prefix(t: str):
+        tts_engine = None
         try:
             tts_engine = get_tts_engine()
             if not tts_engine:
@@ -538,23 +552,22 @@ def speak_no_prefix(text):
                 interrupt_flag.clear()
                 is_speaking.set()
 
-                sentences = t.replace('!', '.').replace('?', '.').split('.')
-                sentences = [s.strip() for s in sentences if s.strip()]
-
-                for sentence in sentences:
-                    if interrupt_flag.is_set():
-                        print("⏸️ Speech interrupted by user")
-                        break
-                    tts_engine.say(sentence)
-
                 try:
+                    # Speak the entire text at once
+                    tts_engine.say(t)
                     tts_engine.runAndWait()
-                except Exception:
-                    for sentence in sentences:
-                        if interrupt_flag.is_set():
-                            break
-                        tts_engine.say(sentence)
-                        tts_engine.runAndWait()
+                except Exception as e:
+                    print(f"⚠️ TTS playback error: {e}")
+                finally:
+                    # Clean up engine after each use
+                    try:
+                        tts_engine.stop()
+                    except:
+                        pass
+                    try:
+                        del tts_engine
+                    except:
+                        pass
 
                 is_speaking.clear()
         except Exception:
@@ -562,6 +575,13 @@ def speak_no_prefix(text):
                 is_speaking.clear()
             except Exception:
                 pass
+        finally:
+            # Ensure cleanup
+            if tts_engine:
+                try:
+                    del tts_engine
+                except:
+                    pass
 
     try:
         if get_tts_engine() is None:
@@ -655,9 +675,16 @@ def main():
     # Fast mode option to reduce latency by skipping heavy features
     FAST_MODE = os.getenv('FAST_MODE', '').strip() not in ('', '0', 'false', 'False')
 
-    # Check if Ollama server is available before proceeding (shorter wait in FAST_MODE)
-    if not wait_for_ollama_server(timeout=5 if FAST_MODE else 10):
-        return
+    # Check if Ollama server is available (optional - continue without it)
+    ollama_available = False
+    try:
+        if wait_for_ollama_server(timeout=5 if FAST_MODE else 10):
+            ollama_available = True
+        else:
+            print("⚠️ Ollama server not available. AI responses will be limited.")
+            print("   To enable AI: Start Ollama server and restart the assistant.")
+    except Exception:
+        print("⚠️ Ollama check failed. Continuing without AI responses.")
 
     db = get_db_connection()
     if not db:
@@ -1195,10 +1222,11 @@ def main():
             except Exception:
                 pass
             _ai_t0 = time.time()
-            response = ask_ai(user_input, history=history, system=system_msg)
+            response = ask_ai(user_input, history=history, system=system_msg) if ollama_available else "Sorry, AI responses are not available. Please start Ollama server."
             _ai_t1 = time.time()
             try:
-                print(f"[AI] Response generated in {_ai_t1 - _ai_t0:.2f}s")
+                if ollama_available:
+                    print(f"[AI] Response generated in {_ai_t1 - _ai_t0:.2f}s")
             except Exception:
                 pass
             speak(response)
