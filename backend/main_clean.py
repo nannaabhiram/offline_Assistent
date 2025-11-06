@@ -474,84 +474,16 @@ def speak(text):
     print(f"Assistant: {text}")
 
     def _speak_worker(t: str):
-        tts_engine = None
+        tts_engine = None  # Initialize at the start
         try:
             tts_engine = get_tts_engine()
             if not tts_engine:
                 return
+            
             with tts_lock:
                 interrupt_flag.clear()
                 is_speaking.set()
                 
-                try:
-                    # Speak the entire text at once instead of splitting into sentences
-                    # This avoids issues with queued utterances not playing completely
-                    print(f"🔊 Speaking...")
-                    tts_engine.say(t)
-                    tts_engine.runAndWait()
-                    print(f"✅ Speech completed")
-                except Exception as e:
-                    print(f"⚠️ TTS playback error: {e}")
-                finally:
-                    # Clean up engine after each use to avoid reuse issues
-                    try:
-                        tts_engine.stop()
-                    except:
-                        pass
-                    try:
-                        del tts_engine
-                    except:
-                        pass
-
-                is_speaking.clear()
-        except Exception as ex:
-            print(f"⚠️ Speech worker error: {ex}")
-            try:
-                is_speaking.clear()
-            except Exception:
-                pass
-        finally:
-            # Ensure cleanup even if exception occurs
-            if tts_engine:
-                try:
-                    del tts_engine
-                except:
-                    pass
-
-    # Run TTS in a daemon thread so CLI remains responsive
-    try:
-        # Ensure engine exists; try a synchronous init to improve chance of immediate playback
-        if get_tts_engine() is None:
-            # If pyttsx3 isn't available but edge-tts is, use edge-tts fallback
-            if EDGE_TTS_AVAILABLE:
-                try:
-                    t = threading.Thread(target=_edge_speak_worker, args=(text,), daemon=True)
-                    t.start()
-                    return
-                except Exception:
-                    pass
-            print("⚠️ TTS not initialized. Speech will be printed only. To enable audio, install pyttsx3 and check audio device.")
-            return
-        thread = threading.Thread(target=_speak_worker, args=(text,), daemon=True)
-        thread.start()
-    except Exception as e:
-        print(f"⚠️ Failed to start speech thread: {e}")
-
-
-def speak_no_prefix(text):
-    # Print without extra prefix
-    print(f"{text}")
-
-    def _speak_worker_no_prefix(t: str):
-        tts_engine = None
-        try:
-            tts_engine = get_tts_engine()
-            if not tts_engine:
-                return
-            with tts_lock:
-                interrupt_flag.clear()
-                is_speaking.set()
-
                 try:
                     # Speak the entire text at once
                     tts_engine.say(t)
@@ -561,28 +493,27 @@ def speak_no_prefix(text):
                 finally:
                     # Clean up engine after each use
                     try:
-                        tts_engine.stop()
-                    except:
-                        pass
-                    try:
-                        del tts_engine
+                        if tts_engine:
+                            tts_engine.stop()
                     except:
                         pass
 
                 is_speaking.clear()
-        except Exception:
+        except Exception as ex:
+            print(f"⚠️ Speech worker error: {ex}")
             try:
                 is_speaking.clear()
-            except Exception:
+            except:
                 pass
         finally:
-            # Ensure cleanup
+            # Ensure cleanup - now tts_engine is always defined
             if tts_engine:
                 try:
                     del tts_engine
                 except:
                     pass
-
+    
+    # Run TTS in a daemon thread so CLI remains responsive
     try:
         if get_tts_engine() is None:
             if EDGE_TTS_AVAILABLE:
@@ -592,7 +523,64 @@ def speak_no_prefix(text):
                     return
                 except Exception:
                     pass
-            print("⚠️ TTS not initialized. Speech will be printed only. To enable audio, install pyttsx3 and check audio device.")
+            print("⚠️ TTS not initialized. Speech will be printed only.")
+            return
+        thread = threading.Thread(target=_speak_worker, args=(text,), daemon=True)
+        thread.start()
+    except Exception as e:
+        print(f"⚠️ Failed to start speech thread: {e}")
+
+
+def speak_no_prefix(text):
+    print(f"{text}")
+
+    def _speak_worker_no_prefix(t: str):
+        tts_engine = None  # Initialize at the start
+        try:
+            tts_engine = get_tts_engine()
+            if not tts_engine:
+                return
+            
+            with tts_lock:
+                interrupt_flag.clear()
+                is_speaking.set()
+
+                try:
+                    tts_engine.say(t)
+                    tts_engine.runAndWait()
+                except Exception as e:
+                    print(f"⚠️ TTS playback error: {e}")
+                finally:
+                    try:
+                        if tts_engine:
+                            tts_engine.stop()
+                    except:
+                        pass
+
+                is_speaking.clear()
+        except Exception:
+            try:
+                is_speaking.clear()
+            except:
+                pass
+        finally:
+            # Ensure cleanup - now tts_engine is always defined
+            if tts_engine:
+                try:
+                    del tts_engine
+                except:
+                    pass
+    
+    try:
+        if get_tts_engine() is None:
+            if EDGE_TTS_AVAILABLE:
+                try:
+                    t = threading.Thread(target=_edge_speak_worker, args=(text,), daemon=True)
+                    t.start()
+                    return
+                except Exception:
+                    pass
+            print("⚠️ TTS not initialized. Speech will be printed only.")
             return
         thread = threading.Thread(target=_speak_worker_no_prefix, args=(text,), daemon=True)
         thread.start()

@@ -261,11 +261,17 @@ def search_serp(query: str, num_results: int = 3) -> Optional[Dict]:
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"SerpAPI error: Status {response.status_code}")
+            print(f"⚠️ SerpAPI error: Status {response.status_code}")
             return None
             
+    except requests.exceptions.ConnectionError:
+        print(f"⚠️ No internet connection. Please check your WiFi or network connection.")
+        return None
+    except requests.exceptions.Timeout:
+        print(f"⚠️ Search request timed out. Please check your internet connection.")
+        return None
     except Exception as e:
-        print(f"SerpAPI search error: {e}")
+        print(f"⚠️ Search error: {e}")
         return None
 
 
@@ -282,34 +288,77 @@ def extract_context_from_serp(serp_data: Dict) -> str:
     if 'answer_box' in serp_data:
         answer_box = serp_data['answer_box']
         if 'answer' in answer_box:
-            context_parts.append(f"Direct Answer: {answer_box['answer']}")
+            context_parts.append(f"📌 {answer_box['answer']}")
         elif 'snippet' in answer_box:
-            context_parts.append(f"Answer: {answer_box['snippet']}")
+            context_parts.append(f"📌 {answer_box['snippet']}")
     
     # Extract knowledge graph
     if 'knowledge_graph' in serp_data:
         kg = serp_data['knowledge_graph']
         if 'title' in kg and 'description' in kg:
-            context_parts.append(f"{kg['title']}: {kg['description']}")
+            context_parts.append(f"ℹ️ {kg['title']}: {kg['description']}")
+    
+    # Extract news results (for news queries)
+    if 'news_results' in serp_data:
+        for i, news in enumerate(serp_data['news_results'][:5], 1):
+            title = news.get('title', '')
+            snippet = news.get('snippet', '')
+            source = news.get('source', '')
+            date = news.get('date', '')
+            if title:
+                news_text = f"{i}. {title}"
+                if snippet:
+                    news_text += f" - {snippet}"
+                if source:
+                    news_text += f" ({source}"
+                    if date:
+                        news_text += f", {date}"
+                    news_text += ")"
+                context_parts.append(news_text)
     
     # Extract organic results (top search results)
-    if 'organic_results' in serp_data:
-        for i, result in enumerate(serp_data['organic_results'][:3], 1):
+    if 'organic_results' in serp_data and not context_parts:
+        for i, result in enumerate(serp_data['organic_results'][:5], 1):
             title = result.get('title', '')
             snippet = result.get('snippet', '')
             if title and snippet:
-                context_parts.append(f"Source {i}: {snippet}")
+                context_parts.append(f"{i}. {title}: {snippet}")
     
-    # Extract weather if available
+    # Extract weather if available - PRIORITY (show first)
     if 'weather_results' in serp_data:
         weather = serp_data['weather_results']
         location = weather.get('location', '')
         temperature = weather.get('temperature', '')
-        weather_info = weather.get('weather', '')
-        if location and temperature:
-            context_parts.append(f"Weather in {location}: {temperature}, {weather_info}")
+        precipitation = weather.get('precipitation', '')
+        humidity = weather.get('humidity', '')
+        wind = weather.get('wind', '')
+        weather_desc = weather.get('weather', '')
+        
+        if location:
+            weather_text = f"🌤️ Weather in {location}:"
+            if temperature:
+                weather_text += f"\n   Temperature: {temperature}"
+            if weather_desc:
+                weather_text += f"\n   Conditions: {weather_desc}"
+            if precipitation:
+                weather_text += f"\n   Precipitation: {precipitation}"
+            if humidity:
+                weather_text += f"\n   Humidity: {humidity}"
+            if wind:
+                weather_text += f"\n   Wind: {wind}"
+            
+            # Add to the beginning of context (most important)
+            context_parts.insert(0, weather_text)
     
-    return "\n".join(context_parts)
+    # Also check for weather in answer_box
+    if 'answer_box' in serp_data and 'weather' in str(serp_data['answer_box']).lower():
+        answer_box = serp_data['answer_box']
+        if 'answer' in answer_box or 'snippet' in answer_box:
+            weather_info = answer_box.get('answer', answer_box.get('snippet', ''))
+            if weather_info and 'weather' not in [p.lower() for p in context_parts]:
+                context_parts.insert(0, f"🌤️ {weather_info}")
+    
+    return "\n\n".join(context_parts)
 
 
 def enhance_with_rag(prompt: str) -> tuple[str, bool]:
@@ -324,7 +373,11 @@ def enhance_with_rag(prompt: str) -> tuple[str, bool]:
     # Search for real-time information
     serp_results = search_serp(prompt)
     if not serp_results:
-        return prompt, False
+        # No internet or search failed - provide helpful offline message
+        offline_prompt = f"""{prompt}
+
+Note: I don't have access to real-time information right now because there's no internet connection. I can only provide general information based on my training data."""
+        return offline_prompt, False
     
     # Extract context from search results
     context = extract_context_from_serp(serp_results)
@@ -332,13 +385,13 @@ def enhance_with_rag(prompt: str) -> tuple[str, bool]:
         return prompt, False
     
     # Enhance prompt with context - clearer instruction to use the data
-    enhanced_prompt = f"""You have access to the following real-time information from the internet:
+    enhanced_prompt = f"""Here is current real-time information:
 
 {context}
 
-User's question: {prompt}
+Question: {prompt}
 
-Please provide a direct and helpful answer using the real-time information above. Do not suggest checking other sources - give the answer based on the data provided."""
+IMPORTANT: Give a direct answer using the EXACT information above. State the temperature, conditions, and details directly. Do NOT say "check the website" or "visit source" - just tell me the information."""
     
     return enhanced_prompt, True
 
